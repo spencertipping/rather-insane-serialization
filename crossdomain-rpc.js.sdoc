@@ -211,4 +211,47 @@ var deserialize = function (expression) {
 };
 
 
+Hashtag driver.
+This is used whenever window.postMessage() is unavailable. It sends limited-size
+messages back and forth by setting the location.hash of the receiving frame.
+Because doing this can jump the document around, it prepends a known prefix that
+is unlikely to be used as the ID of any HTML element.
+
+The exact format of the hashtags is:
+
+| & [sender ID] [message ID] [fragment ID] [message]
+
+Sender, message, and fragment IDs are each four characters wide. The hashtag
+begins with an ampersand to indicate that the message is in fact intended to be
+read as an RPC command; this helps avoid interference with normal navigation.
+
+When the receiving window reads a message, it sets its hashtag to the single
+character '$'. This makes it very inexpensive to check the hashtag for new
+messages.
+
+Data may get lost when communicating this way, especially if one frame talks to
+multiple others simultaneously. To solve this problem, there are several kinds
+of messages that can be sent; each is identified by a single-character prefix:
+
+| d     A data message.
+  e     End of message.
+  r     Successfully received fragment.
+
+All of the IDs are arbitrary; they merely need to uniquely identify stuff that's
+being sent. Here's an example of a transaction between frame A and frame B.
+Frame A's sender ID is AAAA, the message ID is 0000, and frame B's sender ID is
+BBBB. I've put spaces in the example to make it easier to read; in practice they
+wouldn't be there.
+
+| frame A -> frame B: & AAAA 0000 0001 d foo-bar
+  frame B -> frame A: & BBBB 0000 0001 r
+  frame A -> frame B: & AAAA 0000 0002 d bif-baz
+  frame B -> frame A: & BBBB 0000 0002 r
+  frame A -> frame B: & AAAA 0000 0003 e
+  frame B -> frame A: & BBBB 0000 0003 r
+
+From this transaction, frame B would reassemble the string 'foo-barbif-baz' and
+hand that off to the RPC layer, which would then try to execute it (with
+disastrous results, most likely).
+
 };
