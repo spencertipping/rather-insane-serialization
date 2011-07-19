@@ -1,0 +1,21 @@
+A Javascript library that can serialize a lot of stuff. For instance:
+
+  var pathological = [];
+  pathological.push(pathological);
+  pathological.push(pathological);
+
+  var even_worse = {regexp: /foo/};
+  even_worse.loop = pathological;
+  even_worse.just_for_good_measure = function (x) {
+    return x + 1;
+  };
+
+  pathological.push(even_worse);
+
+Rather Insane Serialization can handle this case and reconstruct 'pathological'
+using the serialize/deserialize methods. For example:
+
+  var serialized = rather_insane_serialization.serialize(pathological);
+  var deserialized = rather_insane_serialization.deserialize(pathological);
+
+At this point, 'deserialized' is a copy of 'pathological'.
