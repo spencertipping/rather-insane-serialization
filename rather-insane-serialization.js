@@ -89,6 +89,8 @@ var rather_insane_serialization = {
           pieces.push(visit(x_id, i, x[i]));
 
         refs[x_id] = '[' + pieces.join(',') + ']';
+        if (base) initializers.push([base, index, x_id]);
+
         return 'null';
       }
 
@@ -100,6 +102,8 @@ var rather_insane_serialization = {
                         visit(x_id, k, x[k]));
 
         refs[x_id] = '{' + pieces.join(',') + '}';
+        if (base) initializers.push([base, index, x_id]);
+
         return 'null';
       }
 
@@ -120,7 +124,7 @@ var rather_insane_serialization = {
     var variable_assignments = [];
     for (var k in refs)
       if (refs.hasOwnProperty(k))
-        variable_assignments.push('_' + (+k).toString(36) + '=' = refs[k]);
+        variable_assignments.push('_' + (+k).toString(36) + '=' + refs[k]);
 
     var initializer_statements = [];
     for (var i = 0, l = initializers.length; i < l; ++i)
