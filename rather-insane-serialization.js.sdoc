@@ -62,7 +62,8 @@ var rather_insane_serialization = {
         return x.toString();
 
       if (x.constructor === String)
-        return '"' + x.replace(/["\n\\]/g, '\\$1') + '"';
+        return '"' + x.replace(/["\\]/g, '\\$1').
+                       replace(/\n/g,    '\\n') + '"';
 
       if (x.constructor === Date)
         return 'new Date(' + +x + ')';
