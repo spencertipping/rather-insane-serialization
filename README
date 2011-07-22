@@ -21,3 +21,23 @@ using the serialize/deserialize methods. For example:
 At this point, 'deserialized' is a copy of 'pathological'. 'serialized' is this:
 
 !!!*!!!*!b"b#"Pregexpr!!!$fooNloop_just_for_good_measure#!!!H!A!Ix!J!A{!+!A!A!A!Areturn!Ax!A+!A1;!+}!!!#*$)*+*,--$./0*12
+
+This library handles:
+
++ Numbers (integers, floats, NaN, Infinity, etc. and packs each one fairly efficiently)
++ Strings, including Unicode
++ Booleans
++ null
++ undefined
++ Dates
++ RegExps
++ Functions (closure state is not preserved, unfortunately)
++ Arrays
++ Objects
++ Circular references of all sorts
+
+It does not handle:
+
+- Native objects
+- Instances of functions (stuff created with 'new')
+- Closures (their lexical variables are lost)
