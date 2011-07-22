@@ -5,16 +5,48 @@
 // Introduction.
 // Rather Insane Serialization serves two purposes. One is to provide a reasonably
 // complete serialization/deserialization function that knows what to do with
-// non-JSON data types, circular references, and other such things. The other is to
-// provide a more compact format than JSON, especially for stuff like numerical
-// data. Here is the general usage pattern:
+// non-JSON data types, circular references, class hierarchies, and other such
+// things. The other is to provide a more compact format than JSON, especially for
+// stuff like numerical data. Here is the general usage pattern:
 
-// | rather_insane_serialization.encode(value) -> string
-//   rather_insane_serialization.decode(string) -> value
+// | rather_insane_serialization().encode(value) -> string
+//   rather_insane_serialization().decode(string) -> value
 
 // The serialization output consists entirely of serializable characters and
 // newlines, and the newlines can be mangled or deleted without affecting the
 // deserialized data.
+
+
+// Stream state.
+// rather_insane_serialization() is a function because it supports class hierarchy
+// serialization. The use case is like this:
+
+// | var f = function () {};
+//   var sender = rather_insane_serialization();   // create a new stream
+//   var x = sender.encode(new f());
+//   var y = sender.encode(new f());
+//   var receiver = rather_insane_serialization();
+//   var xd = receiver.decode(x);
+//   var yd = receiver.decode(y);
+//   x.constructor === y.constructor       // -> true
+
+// We want to preserve the intensionality of classes, so we need to actually have
+// the classes deserialize to the same thing (and share a constructor table).
+
+// The internals behind this kind of thing are voodoo and black magic. In
+// particular, they involve rewriting the constructor such that constructors are
+// lost from their surrounding context:
+
+// | var f = function () {};
+//   var sender = rather_insane_serialization();
+//   sender.decode(sender.encode(new f())).constructor === f       // -> false
+
+// However, you can access the proxy constructor by asking for it, and in fact this
+// constructor is stable under serialization:
+
+// | var fd = sender.resolve(f);
+//   sender.decode(sender.encode(new f())).constructor === fd      // -> true
+//   sender.decode(sender.encode(new fd())).constructor === fd     // -> true
 
 
 // Serialization bytecode.
