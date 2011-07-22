@@ -1,8 +1,14 @@
 Rather insane serialization | Spencer Tipping
 Licensed under the terms of the MIT source code license
 
+(function () {
+
 - pinclude src/design.js.sdoc
 - pinclude src/encoders.js.sdoc
-- pincluee src/primitives.js.sdoc
-- pinclude src/classes.js.sdoc
+- pinclude src/primitives.js.sdoc
 - pinclude src/graph.js.sdoc
+
+return rather_insane_serialization =
+       {encode: encode, decode: decode};
+
+})();

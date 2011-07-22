@@ -1,58 +1,26 @@
 // Rather insane serialization | Spencer Tipping
 // Licensed under the terms of the MIT source code license
 
+(function () {
+
 
 
 // Introduction.
 // Rather Insane Serialization serves two purposes. One is to provide a reasonably
 // complete serialization/deserialization function that knows what to do with
-// non-JSON data types, circular references, class hierarchies, and other such
-// things. The other is to provide a more compact format than JSON, especially for
-// stuff like numerical data. Here is the general usage pattern:
+// non-JSON data types, circular references, and other such things. The other is to
+// provide a more compact format than JSON, especially for stuff like numerical
+// data. Here is the general usage pattern:
 
-// | rather_insane_serialization().encode(value) -> string
-//   rather_insane_serialization().decode(string) -> value
+// | rather_insane_serialization.encode(value) -> string
+//   rather_insane_serialization.decode(string) -> value
 
 // The serialization output consists entirely of serializable characters and
 // newlines, and the newlines can be mangled or deleted without affecting the
 // deserialized data.
 
-
-// Stream state.
-// rather_insane_serialization() is a function because it supports class hierarchy
-// serialization. The use case is like this:
-
-// | var f = function () {};
-//   var sender = rather_insane_serialization();   // create a new stream
-//   var x = sender.encode(new f());
-//   var y = sender.encode(new f());
-//   var receiver = rather_insane_serialization();
-//   var xd = receiver.decode(x);
-//   var yd = receiver.decode(y);
-//   x.constructor === y.constructor       // -> true
-
-// We want to preserve the intensionality of classes, so we need to actually have
-// the classes deserialize to the same thing (and share a constructor table).
-
-// The internals behind this kind of thing are voodoo and black magic. In
-// particular, they involve rewriting the constructor such that constructors are
-// lost from their surrounding context:
-
-// | var f = function () {};
-//   var sender = rather_insane_serialization();
-//   sender.decode(sender.encode(new f())).constructor === f       // -> false
-
-// However, you can access the proxy constructor by asking for it, and in fact this
-// constructor is stable under serialization:
-
-// | var fd = sender.resolve(f);
-//   sender.decode(sender.encode(new f())).constructor === fd      // -> true
-//   sender.decode(sender.encode(new fd())).constructor === fd     // -> true
-
-// Note that a stateful serialization stream maintains a reference to every
-// constructor (and by extension, every prototype) that it ever sees. You'll need
-// to release references to the stream in order for the constructors to be
-// garbage-collected.
+// Note that this version doesn't support class hierarchies. I'm working on an
+// extension that will be able to handle this.
 
 
 // Serialization bytecode.
@@ -155,20 +123,11 @@
 // the purposes of edge connections (see 'Reference section' below). The function
 // prefix is '#'.
 
-// Some functions are used as constructors; these are modified at deserialization
-// time to make them safe to invoke. Not all functions need this modification,
-// though. Functions that are known constructors use the '@' prefix instead of '#'.
-
 // Arrays are encoded as the single character !. Their children are described in
 // the reference graph, since arrays can have circular references.
 
 // Regular objects (that is, those without a custom .constructor property) are
-// encoded by the single character ". If an object has a custom .constructor
-// property, it is encoded as a % followed by four bytes identifying the
-// constant-table index of its constructor function. This deserializer knows to
-// modify the constructor function in such a way that it can be safely invoked to
-// recreate the object. (The object's other properties are stored in the reference
-// graph.)
+// encoded by the single character ".
 
 // In addition to literal constants, the constant table encodes the number of
 // arrays and objects that exist. These are then referenced and made into a graph
@@ -309,17 +268,150 @@ var escape_decode = function (s) {
 
 
 
-- pincluee src/primitives.js.sdoc
 
 
-// Constructor encoding.
-// This is just like function encoding, but produces a function that is safe to
-// execute under certain conditions. The exact condition is that its first argument
-// is the secret key used to serialize the data structure.
+// Integer encoding.
+// This is just a radix encoding with a length/sign prefix.
 
-// There is no encoder because functions are marked as constructors retroactively.
+var integer_encode = function (n) {
+  var digits = radix_code(Math.abs(n));
+  var prefix = String.fromCharCode(n ? n > 0 ? 97 + digits.length :
+                                               65 + digits.length : 48);
+  return prefix + digits;
+};
 
-var constructor_decode = function (s, i, key) {
+var integer_decode = function (s, i) {
+  var negative = s.charCodeAt(i) & 32;
+  var length   = s.charAt(i).toUpperCase().charCodeAt(0) - 65;
+  var n        = radix_code(s.substr(i + 1, length));
+  return [n, length + 1];
+};
+
+
+// Date encoding.
+// This is just a fixed-width radix encoding of the number of milliseconds since
+// the epoch.
+
+var date_encode = function (d) {
+  return 'J' + radix_encode(+d, 7);
+};
+
+var date_decode = function (s, i) {
+  return [new Date(radix_decode(s.substr(i + 1, 7))), 8];
+};
+
+
+// String encoding.
+// This is just escape encoding, except that the length and a '$' string prefix are
+// both prepended to the result. For short strings, the K to ` characters are used
+// to imply the length.
+
+// Note that this function shouldn't be used to encode the empty string (not that
+// anything bad will happen). The empty string is implicitly present in the
+// constant table, so it doesn't need to be added.
+
+var string_encode = function (s) {
+  var escaped = escape_encode(s);
+
+  if (escaped.length <= 22)
+    return String.fromCharCode(74 + escaped.length) + escaped;
+
+  var length_prefix = radix_encode(escaped.length, 5);
+  return '$' + length_prefix + escaped;
+};
+
+var string_decode = function (s, i) {
+  if (s.charAt(i) === '$') {
+    // Length-prefixed string (fully coded length in the first five bytes)
+    var length = radix_code(s.substr(i + 1, 5));
+    var string = escape_decode(s.substr(i + 6, length));
+    return [string, length + 6];
+  } else {
+    // Length is encoded in the prefix
+    var length = s.charCodeAt(i) - 74;
+    var string = escape_decode(s.substr(i + 1, length));
+    return [string, length + 1];
+  }
+};
+
+
+// Regular expression encoding.
+// This is just like string encoding, but the prefix varies depending on the flags.
+// There are also fewer digits used to encode the length, since regexps top out at
+// 30M characters or so (and that's on Chrome, which has the highest tolerance for
+// this kind of thing). This means that we need only four digits.
+
+var regexp_encode = function (r) {
+  var multiples     = {g: 4, m: 2, i: 1};
+  var parsed        = /^\/(.*)\/([gim]*)$/.exec(r.toString());
+  var escaped       = escape_encode(parsed[1]);
+  var length_prefix = radix_encode(escaped.length, 4);
+
+  for (var flags = 0, flag_string = parsed[2],
+           i = 0, l = flag_string.length; i < l; ++i)
+    flags += multiples[flag_string.charAt(i)];
+
+  return String.fromCharCode(114 + flags) + length_prefix + escaped;
+};
+
+var regexp_decode = function (s, i) {
+  var flag_mask = s.charCodeAt(i) - 114;
+  var flags     = [flag_mask & 1 ? 'i' : '',
+                   flag_mask & 2 ? 'm' : '',
+                   flag_mask & 4 ? 'g' : ''].join('');
+  var length    = radix_code(s.substr(i + 1, 4));
+  var content   = escape_decode(s.substr(i + 5, length));
+
+  return [new RegExp(content, flags), length + 5];
+};
+
+
+// Function encoding.
+// This is similar to string encoding, except that the word 'function' is trimmed
+// off of the front. This saves space in the encoded output. Also, only four
+// characters are used to represent the length.
+
+// Function encoding is subject to some subtle and tragic flaws. First, closure
+// state isn't preserved (nor can it be, as far as I'm aware). This means that
+// functions will lose their lexical closure variables -- invoking functions that
+// depend on these will result in ReferenceErrors.
+
+// More immediately, though, there's a problem with the Function constructor.
+// Specifically, it takes a variable number of arguments depending on how many
+// arguments the function expects; that is:
+
+// | function (x, y) {return x + y}
+//   // -> new Function('x', 'y', 'return x + y')
+
+// There's a trivial way around this problem; we just need to eval() some code in
+// the decoder; however, this means that the decoder is no longer secure, and
+// ensuring that the code it's evaluating isn't malicious becomes parse-complete.
+
+// More devious, but ultimately a better solution, is to still use the Function
+// constructor but modify the function body to include new logic to handle incoming
+// variables. For any function that takes arguments, these two definitions are
+// equivalent:
+
+// | function (x, y) {...}
+//   function () {var x = arguments[0]; var y = arguments[1]; ...}
+
+// There are only two cases where this is untrue. First, the .length property of
+// the function will differ; I can't think of a good way around this. Second, V8
+// and other statically-optimizing Javascript compilers will generate suboptimal
+// machine code for the function since its list of formals is empty.
+
+// In practice neither of these should matter a whole lot. I mean, you get to
+// serialize functions. How awesome is that?
+
+var function_encode = function (f) {
+  var code          = f.toString().replace(/^\s*function(\s*\w+)?/, '');
+  var escaped       = escape_encode(code);
+  var length_prefix = radix_encode(escaped.length, 4);
+
+  return '#' + length_prefix + escaped;
+};
+
+var function_decode = function (s, i) {
   var length  = radix_code(s.substr(i + 1, 4));
   var code    = escape_decode(s.substr(i + 5, length));
   var pieces  = /^\s*\(([^\)]*)\)\s*\{([\s\S]*)\}\s*$/.exec(code);
@@ -330,74 +422,82 @@ var constructor_decode = function (s, i, key) {
     if (formals[i])
       variables.push(formals[i] + '=arguments[' + i + ']');
 
-  var quoted_key      = '"' + key.replace(/["\\]/g, '\\$1') + '"';
-  var early_return    = 'if (arguments[0] === ' + quoted_key + ') return;';
-
-  var body = early_return +
-             (variables.length ? 'var ' + variables.join(',') + ';' : '') +
+  var body = (variables.length ? 'var ' + variables.join(',') + ';' : '') +
              pieces[2];
 
   return [new Function(body), length + 5];
 };
 
 
-// Instance encoding.
-// This is an object with a known constructor. Encoding and decoding each require
-// more information than usual; the decoder must verify that the constructor
-// function is in fact a valid constructor, and the encoder needs the index of the
-// constructor property in the constant table. Instances use the % prefix and are
-// followed by a four-byte constant table index.
+// Floating-point encoding.
+// This is a fun one. It uses some ad-hoc floating-point manipulation code and a
+// tuple entropy coder to pack lots of data into the first two bytes of the
+// serialization.
 
-var instance_encode = function (o, index) {
-  return '%' + radix_encode(index, 4);
+// You can only encode valid floating-point numbers, which conspicuously don't
+// include infinity, negative infinity, or NaN. It also doesn't handle 0, which has
+// its own encoding.
+
+var float_encode = function (x) {
+  // First determine the mantissa sign and flip it if necessary.
+  var negative = x !== (x = Math.abs(x));
+
+  // Next grab the floating-point exponent. To do this, we normalize the
+  // mantissa to represent a 53-bit integer whose highest bit is always set.
+  var log_2    = Math.log(2);
+  var exponent = Math.floor(Math.log(x) / log_2) - 53;
+  var mantissa = x / Math.exp(exponent * log_2) - Math.exp(53 * log_2);
+
+  // We sometimes lose a few bits due to rounding error.
+  if (mantissa < 0) mantissa = 0;
+
+  // Now radix-code the mantissa, and always use 8 bytes to represent it.
+  var encoded_mantissa = radix_encode(Math.round(mantissa), 8);
+
+  // Radix-code the exponent, exponent sign, and mantissa sign.
+  var exponent_negative = exponent !== (exponent = Math.abs(exponent));
+  var encoded_exponent  = radix_encode(+negative + +exponent_negative * 2 +
+                                       exponent * 4, 2);
+
+  return 'j' + encoded_exponent + encoded_mantissa;
 };
 
-var instance_decode = function (s, i, constants, encoded_constants, key) {
-  var index = radix_decode(s.substr(i + 1, 4));
+var float_decode = function (s, i) {
+  var log_2          = Math.log(2);
+  var exponent_block = radix_code(s.substr(i + 1, 2));
+  var mantissa_block = radix_code(s.substr(i + 3, 8)) + Math.exp(53 * log_2);
 
-  // Check the encoded constant table to make sure that the function at that
-  // index begins with a '@' rather than a '#' (or anything else, for that
-  // matter).
-  if (encoded_constants[index] &&
-      encoded_constants[index].charAt(0) === '@')
-    return [new constants[index](key), 5];
+  var exponent = (exponent_block >>> 2) * (exponent_block & 2 ? -1 : 1);
 
-  throw new Error('serialized value appears corrupt: referenced ' +
-                  encoded_constants[index] + ' as a constructor function');
+  return [mantissa_block * Math.exp(exponent * log_2) *
+                           (exponent_block & 1 ? -1 : 1),
+          11];
 };
 
 
+// Array encoding.
+// This is straightforward; each array is exactly one character.
+
+var array_encode = function (o)    {return '!'};
+var array_decode = function (s, i) {return [[], 1]};
+
+
+// Object encoding.
+// This encoder is used for regular objects; don't use it for objects with custom
+// prototypes. (Since custom-prototype objects reference the constant table,
+// they're handled directly in the encode() and decode() functions.)
+
+var object_encode = function (o)    {return '"'};
+var object_decode = function (s, i) {return [{}, 1]};
 
 
 
-// Object graph encoding and decoding.
+
+
+// Reference graph encoding and decoding.
 // These functions mark objects using a 'secret key' -- that is, a constant string
 // that is astronomically unlikely to exist in an object already. (The odds are
 // equivalent to guessing a 128-bit encryption key.)
-
-// Working with instances is surprisingly subtle. Most of it has to do with the way
-// prototypes work; the problem arises when prototype inheritance is used:
-
-// | var f = function () {...};
-//   var g = function () {...};
-//   g.prototype = new f();        // Set up superclass relationship
-//   g.prototype.constructor = g;  // Set up constructor (this is the problem)
-
-// Once the child class's constructor is reset, we have no way of accessing the
-// parent class.
-
-// The only workaround that I've come up with is to use 'instanceof' and topsort
-// the parents. So if functions F, G, and H are related with prototype inheritance
-// such that F is the superclass of G, which is the superclass of H, then
-// 'instanceof' fully orders them by subclassing; that is:
-
-// | f.prototype instanceof Object         // probably true
-//   g.prototype instanceof f              // definitely true
-//   h.prototype instanceof g              // definitely true
-
-// Then we can identify a prototype by finding the most specific class that it's an
-// instance of; we can then encode the prototype as an instance of this class and
-// encode its .constructor property as just another attribute.
 
 var encode = function (x) {
   // Generate a secret key that is used to identify boxed objects. Each
@@ -488,46 +588,10 @@ var encode = function (x) {
     else if (o.constructor === RegExp)   use(regexp_encode);
     else if (o.constructor === Function) use(function_encode);
 
-    else {
-      // We have a custom object type, so we need to encode its constructor.
-      // Whether or not a given function is a constructor is determined by its
-      // invocation, so here we just visit the regular function and then change
-      // its marking to be a constructor.
-
-      if (o.constructor === null || o.constructor === void 0)
-        // Ok, this is really bad. Nobody should define a class hierarchy this
-        // way. If this is the case, then we don't have a great way to get to
-        // the constructor of an object (keep in mind that aside from the
-        // .constructor property, there generally isn't another way to go from
-        // the prototype to its owner function). I'm going to throw an error to
-        // indicate that the class hierarchy is misleading; for some
-        // applications there are probably better solutions.
-
-        throw new Error('non-primitive object has no constructor: ' + o);
-
-      // Mark the instance ahead of time to eliminate the vulnerability to
-      // cycles. The constructor must appear before any of its instances.
-      var ctor_index = o.constructor[key];
-
-      if (! ctor_index) {
-        marked.push(o.constructor);
-        ctor_index = o.constructor[key] =
-                     constants.push(function_encode(o.constructor)) - 1;
-        o.constructor[key] = ctor_index;
-        o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
-
-        visit_fields(o.constructor);
-      }
-
-      else o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
-
-      // Mark the function as being a constructor. Also be sure to visit its
-      // prototype.
-      if (constants[ctor_index].charAt(0) === '#') {
-        constants[ctor_index] = '@' + constants[ctor_index].substr(1);
-        link(o.constructor, 'prototype', o.constructor.prototype);
-      }
-    }
+    else
+      // We have a custom object type, which is unsupported in this version.
+      throw new Error('due to implementation lameness, classes are not yet ' +
+                      'supported: ' + o);
 
     visit_fields(o);
 
@@ -598,11 +662,7 @@ var decode = function (s) {
              prefix_code <= 96)       return string_decode(s, i);
 
     else if (prefix === '#')          return function_decode(s, i);
-    else if (prefix === '@')          return constructor_decode(s, i, key);
-    else if (prefix === '%')          return instance_decode(s, i,
-                                                             constants,
-                                                             encoded_constants,
-                                                             key);
+
     else throw new Error('invalid prefix: ' + prefix);
   };
 
@@ -654,5 +714,10 @@ var decode = function (s) {
 
 
 
+
+return rather_insane_serialization =
+       {encode: encode, decode: decode};
+
+})();
 
 // Generated by SDoc 

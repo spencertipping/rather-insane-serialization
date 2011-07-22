@@ -1,31 +1,7 @@
-Object graph encoding and decoding.
+Reference graph encoding and decoding.
 These functions mark objects using a 'secret key' -- that is, a constant string
 that is astronomically unlikely to exist in an object already. (The odds are
 equivalent to guessing a 128-bit encryption key.)
-
-Working with instances is surprisingly subtle. Most of it has to do with the way
-prototypes work; the problem arises when prototype inheritance is used:
-
-| var f = function () {...};
-  var g = function () {...};
-  g.prototype = new f();        // Set up superclass relationship
-  g.prototype.constructor = g;  // Set up constructor (this is the problem)
-
-Once the child class's constructor is reset, we have no way of accessing the
-parent class.
-
-The only workaround that I've come up with is to use 'instanceof' and topsort
-the parents. So if functions F, G, and H are related with prototype inheritance
-such that F is the superclass of G, which is the superclass of H, then
-'instanceof' fully orders them by subclassing; that is:
-
-| f.prototype instanceof Object         // probably true
-  g.prototype instanceof f              // definitely true
-  h.prototype instanceof g              // definitely true
-
-Then we can identify a prototype by finding the most specific class that it's an
-instance of; we can then encode the prototype as an instance of this class and
-encode its .constructor property as just another attribute.
 
 var encode = function (x) {
   // Generate a secret key that is used to identify boxed objects. Each
@@ -116,46 +92,10 @@ var encode = function (x) {
     else if (o.constructor === RegExp)   use(regexp_encode);
     else if (o.constructor === Function) use(function_encode);
 
-    else {
-      // We have a custom object type, so we need to encode its constructor.
-      // Whether or not a given function is a constructor is determined by its
-      // invocation, so here we just visit the regular function and then change
-      // its marking to be a constructor.
-
-      if (o.constructor === null || o.constructor === void 0)
-        // Ok, this is really bad. Nobody should define a class hierarchy this
-        // way. If this is the case, then we don't have a great way to get to
-        // the constructor of an object (keep in mind that aside from the
-        // .constructor property, there generally isn't another way to go from
-        // the prototype to its owner function). I'm going to throw an error to
-        // indicate that the class hierarchy is misleading; for some
-        // applications there are probably better solutions.
-
-        throw new Error('non-primitive object has no constructor: ' + o);
-
-      // Mark the instance ahead of time to eliminate the vulnerability to
-      // cycles. The constructor must appear before any of its instances.
-      var ctor_index = o.constructor[key];
-
-      if (! ctor_index) {
-        marked.push(o.constructor);
-        ctor_index = o.constructor[key] =
-                     constants.push(function_encode(o.constructor)) - 1;
-        o.constructor[key] = ctor_index;
-        o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
-
-        visit_fields(o.constructor);
-      }
-
-      else o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
-
-      // Mark the function as being a constructor. Also be sure to visit its
-      // prototype.
-      if (constants[ctor_index].charAt(0) === '#') {
-        constants[ctor_index] = '@' + constants[ctor_index].substr(1);
-        link(o.constructor, 'prototype', o.constructor.prototype);
-      }
-    }
+    else
+      // We have a custom object type, which is unsupported in this version.
+      throw new Error('due to implementation lameness, classes are not yet ' +
+                      'supported: ' + o);
 
     visit_fields(o);
 
@@ -226,11 +166,7 @@ var decode = function (s) {
              prefix_code <= 96)       return string_decode(s, i);
 
     else if (prefix === '#')          return function_decode(s, i);
-    else if (prefix === '@')          return constructor_decode(s, i, key);
-    else if (prefix === '%')          return instance_decode(s, i,
-                                                             constants,
-                                                             encoded_constants,
-                                                             key);
+
     else throw new Error('invalid prefix: ' + prefix);
   };
 
