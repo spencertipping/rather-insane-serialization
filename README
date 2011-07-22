@@ -15,7 +15,7 @@ A Javascript library that can serialize a lot of stuff. For instance:
 Rather Insane Serialization can handle this case and reconstruct 'pathological'
 using the serialize/deserialize methods. For example:
 
-  var serialized = rather_insane_serialization.serialize(pathological);
-  var deserialized = rather_insane_serialization.deserialize(pathological);
+  var serialized = rather_insane_serialization.encode(pathological);
+  var deserialized = rather_insane_serialization.decode(pathological);
 
 At this point, 'deserialized' is a copy of 'pathological'.
