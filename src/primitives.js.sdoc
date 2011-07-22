@@ -1,0 +1,219 @@
+Integer encoding.
+This is just a radix encoding with a length/sign prefix.
+
+var integer_encode = function (n) {
+  var digits = radix_code(Math.abs(n));
+  var prefix = String.fromCharCode(n ? n > 0 ? 97 + digits.length :
+                                               65 + digits.length : 48);
+  return prefix + digits;
+};
+
+var integer_decode = function (s, i) {
+  var negative = s.charCodeAt(i) & 32;
+  var length   = s.charAt(i).toUpperCase().charCodeAt(0) - 65;
+  var n        = radix_code(s.substr(i + 1, length));
+  return [n, length + 1];
+};
+
+
+Date encoding.
+This is just a fixed-width radix encoding of the number of milliseconds since
+the epoch.
+
+var date_encode = function (d) {
+  return 'J' + radix_encode(+d, 7);
+};
+
+var date_decode = function (s, i) {
+  return [new Date(radix_decode(s.substr(i + 1, 7))), 8];
+};
+
+
+String encoding.
+This is just escape encoding, except that the length and a '$' string prefix are
+both prepended to the result. For short strings, the K to ` characters are used
+to imply the length.
+
+Note that this function shouldn't be used to encode the empty string (not that
+anything bad will happen). The empty string is implicitly present in the
+constant table, so it doesn't need to be added.
+
+var string_encode = function (s) {
+  var escaped = escape_encode(s);
+
+  if (escaped.length <= 22)
+    return String.fromCharCode(74 + escaped.length) + escaped;
+
+  var length_prefix = radix_encode(escaped.length, 5);
+  return '$' + length_prefix + escaped;
+};
+
+var string_decode = function (s, i) {
+  if (s.charAt(i) === '$') {
+    // Length-prefixed string (fully coded length in the first five bytes)
+    var length = radix_code(s.substr(i + 1, 5));
+    var string = escape_decode(s.substr(i + 6, length));
+    return [string, length + 6];
+  } else {
+    // Length is encoded in the prefix
+    var length = s.charCodeAt(i) - 74;
+    var string = escape_decode(s.substr(i + 1, length));
+    return [string, length + 1];
+  }
+};
+
+
+Regular expression encoding.
+This is just like string encoding, but the prefix varies depending on the flags.
+There are also fewer digits used to encode the length, since regexps top out at
+30M characters or so (and that's on Chrome, which has the highest tolerance for
+this kind of thing). This means that we need only four digits.
+
+var regexp_encode = function (r) {
+  var multiples     = {g: 4, m: 2, i: 1};
+  var parsed        = /^\/(.*)\/([gim]*)$/.exec(r.toString());
+  var escaped       = escape_encode(parsed[1]);
+  var length_prefix = radix_encode(escaped.length, 4);
+
+  for (var flags = 0, flag_string = parsed[2],
+           i = 0, l = flag_string.length; i < l; ++i)
+    flags += multiples[flag_string.charAt(i)];
+
+  return String.fromCharCode(114 + flags) + length_prefix + escaped;
+};
+
+var regexp_decode = function (s, i) {
+  var flag_mask = s.charCodeAt(i) - 114;
+  var flags     = [flag_mask & 1 ? 'i' : '',
+                   flag_mask & 2 ? 'm' : '',
+                   flag_mask & 4 ? 'g' : ''].join('');
+  var length    = radix_code(s.substr(i + 1, 4));
+  var content   = escape_decode(s.substr(i + 5, length));
+
+  return [new RegExp(content, flags), length + 5];
+};
+
+
+Function encoding.
+This is similar to string encoding, except that the word 'function' is trimmed
+off of the front. This saves space in the encoded output. Also, only four
+characters are used to represent the length.
+
+Function encoding is subject to some subtle and tragic flaws. First, closure
+state isn't preserved (nor can it be, as far as I'm aware). This means that
+functions will lose their lexical closure variables -- invoking functions that
+depend on these will result in ReferenceErrors.
+
+More immediately, though, there's a problem with the Function constructor.
+Specifically, it takes a variable number of arguments depending on how many
+arguments the function expects; that is:
+
+| function (x, y) {return x + y}
+  // -> new Function('x', 'y', 'return x + y')
+
+There's a trivial way around this problem; we just need to eval() some code in
+the decoder; however, this means that the decoder is no longer secure, and
+ensuring that the code it's evaluating isn't malicious becomes parse-complete.
+
+More devious, but ultimately a better solution, is to still use the Function
+constructor but modify the function body to include new logic to handle incoming
+variables. For any function that takes arguments, these two definitions are
+equivalent:
+
+| function (x, y) {...}
+  function () {var x = arguments[0]; var y = arguments[1]; ...}
+
+There are only two cases where this is untrue. First, the .length property of
+the function will differ; I can't think of a good way around this. Second, V8
+and other statically-optimizing Javascript compilers will generate suboptimal
+machine code for the function since its list of formals is empty.
+
+In practice neither of these should matter a whole lot. I mean, you get to
+serialize functions. How awesome is that?
+
+var function_encode = function (f) {
+  var code          = f.toString().replace(/^\s*function(\s*\w+)?/, '');
+  var escaped       = escape_encode(code);
+  var length_prefix = radix_encode(escaped.length, 4);
+
+  return '#' + length_prefix + escaped;
+};
+
+var function_decode = function (s, i) {
+  var length  = radix_code(s.substr(i + 1, 4));
+  var code    = escape_decode(s.substr(i + 5, length));
+  var pieces  = /^\s*\(([^\)]*)\)\s*\{([\s\S]*)\}\s*$/.exec(code);
+  var formals = pieces[1].split(/\s*,\s*/);
+
+  for (var variables = [],
+           i = 0, l = formals.length; i < l; ++i)
+    if (formals[i])
+      variables.push(formals[i] + '=arguments[' + i + ']');
+
+  var body = (variables.length ? 'var ' + variables.join(',') + ';' : '') +
+             pieces[2];
+
+  return [new Function(body), length + 5];
+};
+
+
+Floating-point encoding.
+This is a fun one. It uses some ad-hoc floating-point manipulation code and a
+tuple entropy coder to pack lots of data into the first two bytes of the
+serialization.
+
+You can only encode valid floating-point numbers, which conspicuously don't
+include infinity, negative infinity, or NaN. It also doesn't handle 0, which has
+its own encoding.
+
+var float_encode = function (x) {
+  // First determine the mantissa sign and flip it if necessary.
+  var negative = x !== (x = Math.abs(x));
+
+  // Next grab the floating-point exponent. To do this, we normalize the
+  // mantissa to represent a 53-bit integer whose highest bit is always set.
+  var log_2    = Math.log(2);
+  var exponent = Math.floor(Math.log(x) / log_2) - 53;
+  var mantissa = x / Math.exp(exponent * log_2) - Math.exp(53 * log_2);
+
+  // We sometimes lose a few bits due to rounding error.
+  if (mantissa < 0) mantissa = 0;
+
+  // Now radix-code the mantissa, and always use 8 bytes to represent it.
+  var encoded_mantissa = radix_encode(Math.round(mantissa), 8);
+
+  // Radix-code the exponent, exponent sign, and mantissa sign.
+  var exponent_negative = exponent !== (exponent = Math.abs(exponent));
+  var encoded_exponent  = radix_encode(+negative + +exponent_negative * 2 +
+                                       exponent * 4, 2);
+
+  return 'j' + encoded_exponent + encoded_mantissa;
+};
+
+var float_decode = function (s, i) {
+  var log_2          = Math.log(2);
+  var exponent_block = radix_code(s.substr(i + 1, 2));
+  var mantissa_block = radix_code(s.substr(i + 3, 8)) + Math.exp(53 * log_2);
+
+  var exponent = (exponent_block >>> 2) * (exponent_block & 2 ? -1 : 1);
+
+  return [mantissa_block * Math.exp(exponent * log_2) *
+                           (exponent_block & 1 ? -1 : 1),
+          11];
+};
+
+
+Array encoding.
+This is straightforward; each array is exactly one character.
+
+var array_encode = function (o)    {return '!'};
+var array_decode = function (s, i) {return [[], 1]};
+
+
+Object encoding.
+This encoder is used for regular objects; don't use it for objects with custom
+prototypes. (Since custom-prototype objects reference the constant table,
+they're handled directly in the encode() and decode() functions.)
+
+var object_encode = function (o)    {return '"'};
+var object_decode = function (s, i) {return [{}, 1]};

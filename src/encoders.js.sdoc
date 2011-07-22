@@ -1,0 +1,112 @@
+Radix entropy coder.
+Usage: radix_code(10)                   // -> '+'
+       radix_code('+')                  // -> 10
+
+var radix_encode = function (n, length) {
+  // This function can return empty strings. To prevent this, pass in a value
+  // for 'length'; the resulting number will be padded out to at least this many
+  // characters.
+  //
+  // Note that 'n' must be positive for this function to work correctly.
+
+  for (var digits = []; n; n = Math.floor(n / 94))
+    digits.unshift(String.fromCharCode(33 + n % 94));
+
+  while (length && digits.length < length)
+    digits.unshift('!');
+
+  return digits.join('');
+};
+
+var radix_decode = function (digits) {
+  // Force floating point calculations in case integer overflow doesn't work
+  // properly.
+  for (var n = 0, base = 1.0,
+           i = digits.length - 1; i >= 0; base *= 94, --i)
+    n += (digits.charCodeAt(i) - 33) * base;
+  return n;
+};
+
+var radix_code = function (x) {
+  return x.constructor === String ? radix_decode(x) :
+                                    radix_encode(x);
+};
+
+var radix_entropy = function (n) {
+  return Math.floor(Math.log(n) / Math.log(94)) + 1;
+};
+
+
+Escape entropy coder.
+Usage: escape_encode('string')          // -> 'escaped'
+       escape_decode('escaped')         // -> 'string'
+
+var escape_encode = function (s) {
+  // Most characters pass through normally. Escape characters are handled by a
+  // specialized radix coder. The ASCII passthrough range is 43 - 126
+  // (inclusive); characters 33 - 42 are escape characters.
+
+  for (var result = [],
+           i = 0, l = s.length; i < l; ++i) {
+    var c = s.charCodeAt(i);
+
+    // Literal case: inside the passthrough range.
+    if (c >= 43 && c <= 126) result.push(s.charAt(i));
+    else
+
+    // Two byte escape case: between 0 and 42. In this case we prepend the
+    // escape character and radix-code c into base 94.
+    if (c <= 42) result.push('!' + String.fromCharCode(33 + c));
+    else
+
+    // Two byte escape case: still prefixed with !, but not in the low range. In
+    // this case we add 43, since that entropy has already been used.
+    if (c <= 126 + 84 - 43) result.push('!' + String.fromCharCode(33 + c - 126 + 43));
+    else
+
+    // Two byte escape case: prefixed with ", so subtract 94 from the coded
+    // number. (This follows because we're in base 94.)
+    if (c <= 255) result.push('"' + String.fromCharCode(33 + c - 126 + 43 - 94));
+    else
+
+    // Three byte escape case: we can radix-code c, but we need to bump the
+    // first character by two positions (since the zero and one slots are
+    // already filled by ! and "). To do this we simply add 2 * 94 * 94 to c.
+    result.push(radix_code(2 * 94 * 94 + c));
+  }
+
+  return result.join('');
+};
+
+var escape_decode = function (s) {
+  for (var result = [],
+           i = 0, l = s.length; i < l; ++i) {
+    var c = s.charCodeAt(i);
+
+    // Invalid character: just skip these.
+    if (c <= 32 || c >= 127) continue;
+    else
+
+    // Two-byte escape case: radix-decode and handle the break in the piecewise
+    // function. (See the various two-byte escape cases in the encoder for
+    // insight into why we need this.)
+    if (c <= 34) {
+      var n = radix_code(s.charAt(i) + s.charAt(++i));
+      if (n > 43) n += 126 - 43;
+      result.push(String.fromCharCode(n));
+    }
+    else
+
+    // Three-byte escape case: radix-decode and subtract 2 * 94 * 94.
+    if (c <= 42) result.push(String.fromCharCode(-2 * 94 * 94 +
+                                                 radix_code(s.charAt(i) +
+                                                            s.charAt(++i) +
+                                                            s.charAt(++i))));
+    else
+
+    // Regular case: append the character verbatim.
+    result.push(s.charAt(i));
+  }
+
+  return result.join('');
+};

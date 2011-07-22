@@ -1,0 +1,281 @@
+Object graph encoding and decoding.
+These functions mark objects using a 'secret key' -- that is, a constant string
+that is astronomically unlikely to exist in an object already. (The odds are
+equivalent to guessing a 128-bit encryption key.)
+
+Working with instances is surprisingly subtle. Most of it has to do with the way
+prototypes work; the problem arises when prototype inheritance is used:
+
+| var f = function () {...};
+  var g = function () {...};
+  g.prototype = new f();        // Set up superclass relationship
+  g.prototype.constructor = g;  // Set up constructor (this is the problem)
+
+Once the child class's constructor is reset, we have no way of accessing the
+parent class.
+
+The only workaround that I've come up with is to use 'instanceof' and topsort
+the parents. So if functions F, G, and H are related with prototype inheritance
+such that F is the superclass of G, which is the superclass of H, then
+'instanceof' fully orders them by subclassing; that is:
+
+| f.prototype instanceof Object         // probably true
+  g.prototype instanceof f              // definitely true
+  h.prototype instanceof g              // definitely true
+
+Then we can identify a prototype by finding the most specific class that it's an
+instance of; we can then encode the prototype as an instance of this class and
+encode its .constructor property as just another attribute.
+
+var encode = function (x) {
+  // Generate a secret key that is used to identify boxed objects. Each
+  // character is base-94, so it provides 6.5 bits of entropy. This means that
+  // we need a total of 20 to get 128 bits.
+  for (var key = '',
+           i = 0; i < 20; ++i)
+    key += String.fromCharCode((Math.random() * 95 >>> 0) + 33);
+
+  // Model of the constant table and indexes; these are built during the
+  // traversal phase.
+  var strings   = {};
+  var constants = [false, true, null, void 0, '' / '', 1 / 0, -1 / 0, '', 0];
+
+  var graph  = {};
+  var marked = [];
+
+  // Create a graph link. This uses indirect identifiers.
+  var link = function (object, property, value) {
+    var converted_property = /^\d+$/.test(property) ? +property : property;
+
+    var id = visit(object);
+    graph[id] || (graph[id] = []);
+    graph[id].push([visit(converted_property), visit(value)]);
+    return object;
+  };
+
+  // Visit each of the fields in an object-like thing. This is used for anything
+  // that is likely to have a box.
+  var visit_fields = function (o) {
+    for (var k in o)
+      if (Object.hasOwnProperty.call(o, k) && k !== key)
+        link(o, k, o[k]);
+    return o;
+  };
+
+  // Recursively explore objects, identifying each one. The visit() function
+  // returns the constant table ID of a value; for objects and arrays, it
+  // prefixes the code with 'o' or 'a', respectively, to indicate that the ID
+  // will change.
+  var visit = function (o) {
+    if (o === null)   return 2;
+    if (o === void 0) return 3;
+
+    if (o.constructor === Boolean)
+      return +o;
+
+    if (o.constructor === Number)
+      if (o === 0)                  return 8;
+      else if (o === Math.floor(o)) return constants.push(integer_encode(o)) - 1;
+      else if (isNaN(o))            return 4;
+      else if (! isFinite(o))       return 5 + +(o < 0);
+      else                          return constants.push(float_encode(o)) - 1;
+
+    if (o.constructor === String)
+      if (o.length)
+        // Update the string table so that we reuse strings when possible. Prefix
+        // the index with the secret key to bypass any IE-related prototype bugs.
+        return strings[key + o] ||
+               (strings[key + o] = constants.push(string_encode(o)) - 1);
+      else
+        return 7;       // Offset of the empty string
+
+    return mark(o);
+  };
+
+  // Adds an object to the constant table and traverses its children.
+  var mark = function (o) {
+    // No need to revisit an object we've already seen. I'm doing the
+    // hasOwnProperty check here because we mark prototypes; if the prototype of
+    // an object is marked, then it will appear to have a key even when it
+    // doesn't really.
+    if (Object.prototype.hasOwnProperty.call(o, key)) return o[key];
+
+    marked.push(o);
+
+    // Create the constant table entry. This has to happen first because
+    // visiting an object's fields might re-enter this function and disrupt any
+    // space we might have allocated.
+    var use = function (encoder) {
+      return o[key] = constants.push(encoder(o)) - 1;
+    };
+
+    // Use various encoders for the different kinds of objects.
+    if (o.constructor === Object)        use(object_encode);
+    else if (o.constructor === Array)    use(array_encode);
+    else if (o.constructor === Date)     use(date_encode);
+    else if (o.constructor === RegExp)   use(regexp_encode);
+    else if (o.constructor === Function) use(function_encode);
+
+    else {
+      // We have a custom object type, so we need to encode its constructor.
+      // Whether or not a given function is a constructor is determined by its
+      // invocation, so here we just visit the regular function and then change
+      // its marking to be a constructor.
+
+      if (o.constructor === null || o.constructor === void 0)
+        // Ok, this is really bad. Nobody should define a class hierarchy this
+        // way. If this is the case, then we don't have a great way to get to
+        // the constructor of an object (keep in mind that aside from the
+        // .constructor property, there generally isn't another way to go from
+        // the prototype to its owner function). I'm going to throw an error to
+        // indicate that the class hierarchy is misleading; for some
+        // applications there are probably better solutions.
+
+        throw new Error('non-primitive object has no constructor: ' + o);
+
+      // Mark the instance ahead of time to eliminate the vulnerability to
+      // cycles. The constructor must appear before any of its instances.
+      var ctor_index = o.constructor[key];
+
+      if (! ctor_index) {
+        marked.push(o.constructor);
+        ctor_index = o.constructor[key] =
+                     constants.push(function_encode(o.constructor)) - 1;
+        o.constructor[key] = ctor_index;
+        o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
+
+        visit_fields(o.constructor);
+      }
+
+      else o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
+
+      // Mark the function as being a constructor. Also be sure to visit its
+      // prototype.
+      if (constants[ctor_index].charAt(0) === '#') {
+        constants[ctor_index] = '@' + constants[ctor_index].substr(1);
+        link(o.constructor, 'prototype', o.constructor.prototype);
+      }
+    }
+
+    visit_fields(o);
+
+    return o[key];
+  };
+
+  // Visit the object that we want to serialize. This will side-effectfully
+  // populate the constant table and the reference graph.
+  var id = visit(x);
+
+  // Unmark all of the objects we annotated. Because the key couldn't have
+  // collided in the first place, we know it's ok to just delete it.
+  for (var i = 0, l = marked.length; i < l; ++i)
+    delete marked[i][key];
+
+  // Serialize the reference graph. The first entry here is the length, which is
+  // incremented for every object we serialize. As per the spec, all integer
+  // serializations are adjusted to contain just enough entropy to encode any
+  // constant.
+  var constant_width = radix_entropy(constants.length - 1);
+  var reference_graph = [0];
+  for (var k in graph)
+    if (Object.hasOwnProperty.call(graph, k)) {
+      var edges = graph[k];
+
+      ++reference_graph[0];
+      reference_graph.push(radix_encode(+k, constant_width));
+      reference_graph.push(radix_encode(edges.length, constant_width));
+
+      for (var i = 0, l = edges.length; i < l; ++i) {
+        reference_graph.push(radix_encode(edges[i][0], constant_width));
+        reference_graph.push(radix_encode(edges[i][1], constant_width));
+      }
+    }
+
+  reference_graph[0] = radix_encode(reference_graph[0], 4);
+
+  // And that's all! We now have the complete constant table and the complete
+  // reference graph, so we just serialize each one and put them back to back.
+  return radix_encode(constants.length - 9, 4) +
+         radix_encode(id, 4) +
+         constants.slice(9).join('') +
+         reference_graph.join('');
+};
+
+var decode = function (s) {
+  // Create a new secret key for secure instantiation. See constructor_decode()
+  // for more information.
+  for (var key = '',
+           i = 0; i < 20; ++i)
+    key += String.fromCharCode((Math.random() * 95 >>> 0) + 33);
+
+  // Decodes something based on the prefix and returns it, along with the number
+  // of characters that should be skipped.
+  var decode_one = function (s, i) {
+    var prefix      = s.charAt(i);
+    var prefix_code = prefix.charCodeAt(0);
+
+    if (prefix === '!')               return array_decode(s, i);
+    else if (prefix === '"')          return object_decode(s, i);
+    else if (prefix === 'j')          return float_decode(s, i);
+    else if (prefix === 'J')          return date_decode(s, i);
+    else if (/[r-y]/.test(prefix))    return regexp_decode(s, i);
+    else if (/[a-iA-I]/.test(prefix)) return integer_decode(s, i);
+
+    else if (prefix === '$' ||
+             prefix_code >= 74 &&
+             prefix_code <= 96)       return string_decode(s, i);
+
+    else if (prefix === '#')          return function_decode(s, i);
+    else if (prefix === '@')          return constructor_decode(s, i, key);
+    else if (prefix === '%')          return instance_decode(s, i,
+                                                             constants,
+                                                             encoded_constants,
+                                                             key);
+    else throw new Error('invalid prefix: ' + prefix);
+  };
+
+  // Remove all invalid characters from the original string.
+  for (var valid = [],
+           i = 0, l = s.length; i < l; ++i)
+    if (s.charCodeAt(i) >= 33 && s.charCodeAt(i) <= 126)
+      valid.push(s.charAt(i));
+
+  s = valid.join('');
+
+  // Reconstruct the constant table.
+  var encoded_constants = ['', '', '', '', '', '', '', '', ''];
+
+  var constants = [false, true, null, void 0, '' / '', 1 / 0, -1 / 0, '', 0];
+  var result_id = radix_decode(s.substr(4, 4));
+
+  for (var position = 8,
+           i = radix_decode(s.substr(0, 4)) - 1; i >= 0; --i) {
+    var parsed = decode_one(s, position);
+    encoded_constants.push(s.substring(position, position += parsed[1]));
+    constants.push(parsed[0]);
+  }
+
+  // Reconstruct the constant width. This is used for all of the entries in the
+  // reference table.
+  var w = radix_entropy(constants.length - 1);
+
+  // We don't actually need to rebuild the reference graph as a structure.
+  // Instead, we can just connect the edges as we decode them.
+  for (var i = radix_decode(s.substring(position, position += 4)) - 1;
+           i >= 0; --i) {
+    var base = constants[radix_decode(s.substring(position,
+                                                  position += w))];
+
+    // Deserialize object groups, each one of which has one or many links.
+    for (var j = radix_decode(s.substring(position, position += w)) - 1;
+             j >= 0; --j) {
+      var property = constants[radix_decode(s.substring(position,
+                                                        position += w))];
+      var value    = constants[radix_decode(s.substring(position,
+                                                        position += w))];
+      base[property] = value;
+    }
+  }
+
+  return constants[result_id];
+};
