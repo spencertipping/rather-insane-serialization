@@ -46,10 +46,9 @@
 
 
 // Constant table.
-// The constant table begins with three numbers. The first is the number of
-// constants that are present, the second is the number of arrays to create, and
-// the third is the number of objects to create. After this, the reference graph
-// indicates the links between constants.
+// The constant table begins with a five-byte number that indicates how many
+// constants it contains. This is followed by that many constants. After this, the
+// reference graph indicates the links between constants.
 
 // The bytecode is designed for compactness, so it contains a lot of arithmetic
 // coding. In particular, integers are encoded in base 94 and floating point
@@ -59,10 +58,11 @@
 // The first few entries of the constant table are fixed and are not serialized.
 // They are:
 
-// | 0: false              4: NaN
-//   1: true               5: +infinity
-//   2: null               6: -infinity
-//   3: undefined
+// | 0: false              5: +infinity
+//   1: true               6: -infinity
+//   2: null               7: empty string
+//   3: undefined          8: 0
+//   4: NaN
 
 // Numbers have several different prefixes depending on the amount of information
 // required to encode them. Integers are coded with a letter describing both the
@@ -121,6 +121,17 @@
 // are referenced from the reference section, where they are treated as objects for
 // the purposes of edge connections (see 'Reference section' below). The function
 // prefix is '#'.
+
+// Arrays are encoded as the single character !. Their children are described in
+// the reference graph, since arrays can have circular references.
+
+// Regular objects (that is, those without a custom .constructor property) are
+// encoded by the single character ". If an object has a custom .constructor
+// property, it is encoded as a % followed by five bytes identifying the
+// constant-table index of its constructor function. This deserializer knows to
+// modify the constructor function in such a way that it can be safely invoked to
+// recreate the object. (The object's other properties are stored in the reference
+// graph.)
 
 // In addition to literal constants, the constant table encodes the number of
 // arrays and objects that exist. These are then referenced and made into a graph
@@ -459,6 +470,141 @@ var float_decode = function (s, i) {
   return [mantissa_block * Math.exp(exponent * log_2) *
                            (exponent_block & 1 ? -1 : 1),
           11];
+};
+
+
+// Array encoding.
+// This is straightforward; each array is exactly one character.
+
+var array_encode = function (o)    {return '!'};
+var array_decode = function (s, i) {return [[], 1]};
+
+
+// Object encoding.
+// This encoder is used for regular objects; don't use it for objects with custom
+// prototypes. (Since custom-prototype objects reference the constant table,
+// they're handled directly in the encode() and decode() functions.)
+
+var object_encode = function (o)    {return '"'};
+var object_decode = function (s, i) {return [{}, 1]};
+
+
+// Constructor encoding.
+// This is just like function encoding, but produces a function that is safe to
+// execute under certain conditions.
+
+
+// Object graph encoding and decoding.
+// These functions mark objects using a 'secret key' -- that is, a constant string
+// that is astronomically unlikely to exist in an object already. Because it is
+// regenerated for every new serialization operation and erased, you can count on
+// it never to collide. (The odds are equivalent to guessing a 128-bit encryption
+// key.)
+
+var encode = function (x) {
+  // Generate a secret key that is used to identify boxed objects. Each
+  // character is base-94, so it provides 6.5 bits of entropy. This means that
+  // we need a total of 20 to get 128 bits.
+  for (var key = '',
+           i = 0; i < 20; ++i)
+    key += String.fromCharCode((Math.random() * 95 >>> 0) + 33);
+
+  // Model of the constant table and indexes; these are built during the
+  // traversal phase.
+  var strings   = {};
+  var constants = [false, true, null, void 0,
+                   '' / '', 1.0 / 0.0, -1.0 / 0.0, '', 0];
+  var graph = [];
+
+  // Create a graph link. This uses indirect identifiers.
+  var link = function (object, property, value) {
+    graph.push({object: object[key], property: property, value: visit(value)});
+    return object;
+  };
+
+  var array_link = function (array) {
+    for (var ids = [],
+             i = 0, l = array.length; i < l; ++i)
+      ids.push(visit(array[i]));
+    graph.push({array: array[key], children: ids});
+    return array;
+  };
+
+  // Visit each of the fields in an object-like thing. This is used for anything
+  // that is likely to have a box.
+  var visit_fields = function (o) {
+    for (var k in o)
+      if (Object.hasOwnProperty.call(o, k) && k !== key &&
+          ! (o.constructor === Array && /^\d+$/.test(k)))
+        link(o, k, o[k]);
+    return o;
+  };
+
+  // Recursively explore objects, identifying each one. The visit() function
+  // returns the constant table ID of a value; for objects and arrays, it
+  // prefixes the code with 'o' or 'a', respectively, to indicate that the ID
+  // will change.
+  var visit = function (o) {
+    if (o === true)    return 0;
+    if (o === false)   return 1;
+    if (o === null)    return 2;
+    if (o === void 0)  return 3;
+
+    if (isNaN(o))      return 4;
+    if (! isFinite(o)) return 5 + +(o < 0);
+    if (o === '')      return 7;
+    if (o === 0)       return 8;
+
+    if (o.constructor === Number)
+      if (o === Math.round(o)) return constants.push(integer_encode(o)) - 1;
+      else                     return constants.push(float_encode(o))   - 1;
+
+    if (o.constructor === String)
+      // Update the string table so that we reuse strings when possible.
+      return strings[o] || (strings[o] = constants.push(string_encode(o)) - 1);
+
+    return mark(o);
+  };
+
+  // Adds an object to the constant table and traverses its children.
+  var mark = function (o) {
+    // No need to revisit an object we've already seen.
+    if (o[key]) return o[key];
+
+    // Create the constant table entry. This has to happen first because
+    // visiting an object's fields might re-enter this function and disrupt any
+    // space we might have allocated.
+    var use = function (encoder) {
+      return o[key] = constants.push(encoder(o)) - 1;
+    };
+
+    // Use various encoders for the different kinds of objects.
+    if (o.constructor === Object)      use(object_encode);
+    else if (o.constructor === Date)   use(date_encode);
+    else if (o.constructor === RegExp) use(regexp_encode);
+
+    else if (o.constructor === Function) {
+      use(function_encode);
+      link(o, 'prototype', o.prototype);
+    }
+
+    else if (o.constructor === Array) {
+      use(array_encode);
+      array_link(o);
+    }
+
+    else {
+      // This is where stuff gets fun. Encode a custom constructor function that
+      // has been modified to return immediately if 
+    }
+
+    visit_fields(o);
+
+    if (o.constructor === Array)    array_link(o);
+    if (o.constructor === Function) link(o, 'prototype', o.prototype);
+
+    return o[key];
+  };
 };
 
 // Generated by SDoc 
