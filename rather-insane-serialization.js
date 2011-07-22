@@ -188,7 +188,7 @@ var radix_code = function (x) {
 };
 
 var radix_entropy = function (n) {
-  return Math.floor(Math.log(n) / Math.log(94));
+  return Math.floor(Math.log(n) / Math.log(94)) + 1;
 };
 
 
@@ -294,7 +294,7 @@ var date_encode = function (d) {
 };
 
 var date_decode = function (s, i) {
-  return [new Date(radix_decode(s.substr(1, 7))), 8];
+  return [new Date(radix_decode(s.substr(i + 1, 7))), 8];
 };
 
 
@@ -416,7 +416,8 @@ var function_decode = function (s, i) {
 
   for (var variables = [],
            i = 0, l = formals.length; i < l; ++i)
-    variables.push(formals[i] + '=arguments[' + i + ']');
+    if (formals[i])
+      variables.push(formals[i] + '=arguments[' + i + ']');
 
   var body = (variables.length ? 'var ' + variables.join(',') + ';' : '') +
              pieces[2];
@@ -502,9 +503,10 @@ var constructor_decode = function (s, i, key) {
 
   for (var variables = [],
            i = 0, l = formals.length; i < l; ++i)
-    variables.push(formals[i] + '=arguments[' + i + ']');
+    if (formals[i])
+      variables.push(formals[i] + '=arguments[' + i + ']');
 
-  var quoted_key      = '"' + key.replace(/"/g, '\\"') + '"';
+  var quoted_key      = '"' + key.replace(/["\\]/g, '\\$1') + '"';
   var early_return    = 'if (arguments[0] === ' + quoted_key + ') return;';
 
   var body = early_return +
@@ -534,7 +536,7 @@ var instance_decode = function (s, i, constants, encoded_constants, key) {
   // matter).
   if (encoded_constants[index] &&
       encoded_constants[index].charAt(0) === '@')
-    return new constants[index](key);
+    return [new constants[index](key), 5];
 
   throw new Error('serialized value appears corrupt: referenced ' +
                   encoded_constants[index] + ' as a constructor function');
@@ -557,8 +559,8 @@ var encode = function (x) {
   // Model of the constant table and indexes; these are built during the
   // traversal phase.
   var strings   = {};
-  var constants = [false, true, null, void 0,
-                   '' / '', 1.0 / 0.0, -1.0 / 0.0, '', 0];
+  var constants = [false, true, null, void 0, '' / '', 1 / 0, -1 / 0, '', 0];
+
   var graph  = {};
   var marked = [];
 
@@ -566,8 +568,9 @@ var encode = function (x) {
   var link = function (object, property, value) {
     var converted_property = /^\d+$/.test(property) ? +property : property;
 
-    graph[object[key]] || (graph[object[key]] = [])
-    graph[object[key]].push([visit(converted_property), visit(value)]);
+    var id = visit(object);
+    graph[id] || (graph[id] = []);
+    graph[id].push([visit(converted_property), visit(value)]);
     return object;
   };
 
@@ -585,33 +588,38 @@ var encode = function (x) {
   // prefixes the code with 'o' or 'a', respectively, to indicate that the ID
   // will change.
   var visit = function (o) {
-    if (o === true)    return 0;
-    if (o === false)   return 1;
-    if (o === null)    return 2;
-    if (o === void 0)  return 3;
+    if (o === null)   return 2;
+    if (o === void 0) return 3;
 
-    if (isNaN(o))      return 4;
-    if (! isFinite(o)) return 5 + +(o < 0);
-    if (o === '')      return 7;
-    if (o === 0)       return 8;
+    if (o.constructor === Boolean)
+      return +o;
 
     if (o.constructor === Number)
-      if (o === Math.floor(o)) return constants.push(integer_encode(o)) - 1;
-      else                     return constants.push(float_encode(o))   - 1;
+      if (o === 0)                  return 8;
+      else if (o === Math.floor(o)) return constants.push(integer_encode(o)) - 1;
+      else if (isNaN(o))            return 4;
+      else if (! isFinite(o))       return 5 + +(o < 0);
+      else                          return constants.push(float_encode(o)) - 1;
 
     if (o.constructor === String)
-      // Update the string table so that we reuse strings when possible. Prefix
-      // the index with the secret key to bypass any IE-related prototype bugs.
-      return strings[key + o] ||
-             (strings[key + o] = constants.push(string_encode(o)) - 1);
+      if (o.length)
+        // Update the string table so that we reuse strings when possible. Prefix
+        // the index with the secret key to bypass any IE-related prototype bugs.
+        return strings[key + o] ||
+               (strings[key + o] = constants.push(string_encode(o)) - 1);
+      else
+        return 7;       // Offset of the empty string
 
     return mark(o);
   };
 
   // Adds an object to the constant table and traverses its children.
   var mark = function (o) {
-    // No need to revisit an object we've already seen.
-    if (o[key]) return o[key];
+    // No need to revisit an object we've already seen. I'm doing the
+    // hasOwnProperty check here because we mark prototypes; if the prototype of
+    // an object is marked, then it will appear to have a key even when it
+    // doesn't really.
+    if (Object.prototype.hasOwnProperty.call(o, key)) return o[key];
 
     marked.push(o);
 
@@ -623,17 +631,13 @@ var encode = function (x) {
     };
 
     // Use various encoders for the different kinds of objects.
-    if (o.constructor === Object)      use(object_encode);
-    else if (o.constructor === Array)  use(array_encode);
-    else if (o.constructor === Date)   use(date_encode);
-    else if (o.constructor === RegExp) use(regexp_encode);
+    if (o.constructor === Object)        use(object_encode);
+    else if (o.constructor === Array)    use(array_encode);
+    else if (o.constructor === Date)     use(date_encode);
+    else if (o.constructor === RegExp)   use(regexp_encode);
+    else if (o.constructor === Function) use(function_encode);
 
-    else if (o.constructor === Function) {
-      use(function_encode);
-      link(o, 'prototype', o.prototype);
-    }
-
-    else {
+    else if (o !== (o.constructor && o.constructor.prototype)) {
       // We have a custom object type, so we need to encode its constructor.
       // Whether or not a given function is a constructor is determined by its
       // invocation, so here we just visit the regular function and then change
@@ -651,18 +655,27 @@ var encode = function (x) {
         throw new Error('non-primitive object has no constructor: ' + o);
 
       // Mark the instance ahead of time to eliminate the vulnerability to
-      // cycles.
-      o[key] = constants.push(null) - 1;
-      link(o, 'constructor', o.constructor);
-
+      // cycles. The constructor must appear before any of its instances.
       var ctor_index = o.constructor[key];
 
-      // Mark the function as being a constructor.
-      if (constants[ctor_index].charAt(0) === '#')
-        constants[ctor_index] = '@' + constants[ctor_index].substr(1);
+      if (! ctor_index) {
+        marked.push(o.constructor);
+        ctor_index = o.constructor[key] =
+                     constants.push(function_encode(o.constructor)) - 1;
+        o.constructor[key] = ctor_index;
+        o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
 
-      // Go back and encode the instance with the now-known constructor index.
-      constants[o[key]] = instance_encode(o, ctor_index);
+        visit_fields(o.constructor);
+      }
+
+      else o[key] = constants.push(instance_encode(o, ctor_index)) - 1;
+
+      // Mark the function as being a constructor. Also be sure to visit its
+      // prototype.
+      if (constants[ctor_index].charAt(0) === '#') {
+        constants[ctor_index] = '@' + constants[ctor_index].substr(1);
+        link(o.constructor, 'prototype', o.constructor.prototype);
+      }
     }
 
     visit_fields(o);
@@ -680,18 +693,22 @@ var encode = function (x) {
     delete marked[i][key];
 
   // Serialize the reference graph. The first entry here is the length, which is
-  // incremented for every object we serialize.
+  // incremented for every object we serialize. As per the spec, all integer
+  // serializations are adjusted to contain just enough entropy to encode any
+  // constant.
+  var constant_width = radix_entropy(constants.length - 1);
   var reference_graph = [0];
   for (var k in graph)
     if (Object.hasOwnProperty.call(graph, k)) {
       var edges = graph[k];
 
       ++reference_graph[0];
-      reference_graph.push(radix_encode(edges.length, 4));
+      reference_graph.push(radix_encode(+k, constant_width));
+      reference_graph.push(radix_encode(edges.length, constant_width));
 
       for (var i = 0, l = edges.length; i < l; ++i) {
-        reference_graph.push(radix_encode(edges[i][0], 4));
-        reference_graph.push(radix_encode(edges[i][1], 4));
+        reference_graph.push(radix_encode(edges[i][0], constant_width));
+        reference_graph.push(radix_encode(edges[i][1], constant_width));
       }
     }
 
@@ -703,6 +720,85 @@ var encode = function (x) {
          radix_encode(id, 4) +
          constants.slice(9).join('') +
          reference_graph.join('');
+};
+
+var decode = function (s) {
+  // Create a new secret key for secure instantiation. See constructor_decode()
+  // for more information.
+  for (var key = '',
+           i = 0; i < 20; ++i)
+    key += String.fromCharCode((Math.random() * 95 >>> 0) + 33);
+
+  // Decodes something based on the prefix and returns it, along with the number
+  // of characters that should be skipped.
+  var decode_one = function (s, i) {
+    var prefix      = s.charAt(i);
+    var prefix_code = prefix.charCodeAt(0);
+
+    if (prefix === '!')               return array_decode(s, i);
+    else if (prefix === '"')          return object_decode(s, i);
+    else if (prefix === 'j')          return float_decode(s, i);
+    else if (prefix === 'J')          return date_decode(s, i);
+    else if (/[r-y]/.test(prefix))    return regexp_decode(s, i);
+    else if (/[a-iA-I]/.test(prefix)) return integer_decode(s, i);
+
+    else if (prefix === '$' ||
+             prefix_code >= 74 &&
+             prefix_code <= 96)       return string_decode(s, i);
+
+    else if (prefix === '#')          return function_decode(s, i);
+    else if (prefix === '@')          return constructor_decode(s, i, key);
+    else if (prefix === '%')          return instance_decode(s, i,
+                                                             constants,
+                                                             encoded_constants,
+                                                             key);
+    else throw new Error('invalid prefix: ' + prefix);
+  };
+
+  // Remove all invalid characters from the original string.
+  for (var valid = [],
+           i = 0, l = s.length; i < l; ++i)
+    if (s.charCodeAt(i) >= 33 && s.charCodeAt(i) <= 126)
+      valid.push(s.charAt(i));
+
+  s = valid.join('');
+
+  // Reconstruct the constant table.
+  var encoded_constants = ['', '', '', '', '', '', '', '', ''];
+
+  var constants = [false, true, null, void 0, '' / '', 1 / 0, -1 / 0, '', 0];
+  var result_id = radix_decode(s.substr(4, 4));
+
+  for (var position = 8,
+           i = radix_decode(s.substr(0, 4)) - 1; i >= 0; --i) {
+    var parsed = decode_one(s, position);
+    encoded_constants.push(s.substring(position, position += parsed[1]));
+    constants.push(parsed[0]);
+  }
+
+  // Reconstruct the constant width. This is used for all of the entries in the
+  // reference table.
+  var w = radix_entropy(constants.length - 1);
+
+  // We don't actually need to rebuild the reference graph as a structure.
+  // Instead, we can just connect the edges as we decode them.
+  for (var i = radix_decode(s.substring(position, position += 4)) - 1;
+           i >= 0; --i) {
+    var base = constants[radix_decode(s.substring(position,
+                                                  position += w))];
+
+    // Deserialize object groups, each one of which has one or many links.
+    for (var j = radix_decode(s.substring(position, position += w)) - 1;
+             j >= 0; --j) {
+      var property = constants[radix_decode(s.substring(position,
+                                                        position += w))];
+      var value    = constants[radix_decode(s.substring(position,
+                                                        position += w))];
+      base[property] = value;
+    }
+  }
+
+  return constants[result_id];
 };
 
 // Generated by SDoc 
