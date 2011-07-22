@@ -7,7 +7,14 @@ Rather Insane Serialization serves two purposes. One is to provide a reasonably
 complete serialization/deserialization function that knows what to do with
 non-JSON data types, circular references, and other such things. The other is to
 provide a more compact format than JSON, especially for stuff like numerical
-data.
+data. Here is the general usage pattern:
+
+| rather_insane_serialization.encode(value) -> string
+  rather_insane_serialization.decode(string) -> value
+
+The serialization output consists entirely of serializable characters and
+newlines, and the newlines can be mangled or deleted without affecting the
+deserialized data.
 
 
 Serialization bytecode.
@@ -132,15 +139,18 @@ The first entry in the reference section is the result of deserialization.
 
 
 Radix entropy coder.
-Usage: radix_code(10)                   // -> 'string'
-       radix_code('string')             // -> 10
+Usage: radix_code(10)                   // -> '+'
+       radix_code('+')                  // -> 10
 
 var radix_encode = function (n, length) {
   // This function can return empty strings. To prevent this, pass in a value
   // for 'length'; the resulting number will be padded out to at least this many
   // characters.
-  for (var digits = []; n; n = n / 94 >>> 0)
-    digits.push(String.fromCharCode(33 + n % 94));
+  //
+  // Note that 'n' must be positive for this function to work correctly.
+
+  for (var digits = []; n; n = Math.floor(n / 94))
+    digits.unshift(String.fromCharCode(33 + n % 94));
 
   while (length && digits.length < length)
     digits.unshift('!');
@@ -149,8 +159,10 @@ var radix_encode = function (n, length) {
 };
 
 var radix_decode = function (digits) {
-  for (var n = 0, base = 1,
-           i = 0, l = digits.length; i < l; base *= 94, ++i)
+  // Force floating point calculations in case integer overflow doesn't work
+  // properly.
+  for (var n = 0, base = 1.0,
+           i = digits.length - 1; i >= 0; base *= 94, --i)
     n += (digits.charCodeAt(i) - 33) * base;
   return n;
 };
@@ -160,31 +172,8 @@ var radix_code = function (x) {
                                     radix_encode(x);
 };
 
-
-Tuple entropy coder.
-Usage: tuple_coder(2, 3, 5)([0, 1, 3])          // -> 'string'
-       tuple_coder(2, 3, 5)('string')           // -> [0, 1, 3]
-
-var tuple_encode = function (structure, tuple) {
-  for (var n = 0,
-           i = 0, l = structure.length; i < l; n *= structure[i], ++i)
-    n += tuple[i] || 0;
-  return radix_code(n);
-};
-
-var tuple_decode = function (structure, digits) {
-  for (var n = radix_code(digits), tuple = [],
-           i = structure.length - 1; i >= 0; n = n / structure[i] >>> 0, --i)
-    tuple.push(n % structure[i]);
-  return tuple;
-};
-
-var tuple_coder = function () {
-  var structure = [].slice.call(arguments);
-  return function (x) {
-    return x.constructor === Array ? tuple_decode(structure, x) :
-                                     tuple_encode(structure, x);
-  };
+var radix_entropy = function (n) {
+  return Math.floor(Math.log(n) / Math.log(94));
 };
 
 
@@ -264,17 +253,110 @@ var escape_decode = function (s) {
 
 
 Integer encoding.
-Usage: integer_encode(10)               // -> 'a+'
+This is just a radix encoding with a length/sign prefix.
 
 var integer_encode = function (n) {
-  // This is just a radix encoding with a length/sign prefix.
   var digits = radix_code(Math.abs(n));
   var prefix = String.fromCharCode(n ? n > 0 ? 97 + digits.length :
                                                65 + digits.length : 48);
   return prefix + digits;
 };
 
+var integer_decode = function (s, i) {
+  var negative = s.charCodeAt(i) & 32;
+  var length   = s.charAt(i).toUpperCase().charCodeAt(0) - 65;
+  var n        = radix_code(s.substr(i + 1, length));
+  return [n, length + 1];
+};
+
+
+String encoding.
+This is just escape encoding, except that the length and a '$' string prefix are
+both prepended to the result.
+
+var string_encode = function (s) {
+  var escaped       = escape_encode(s);
+  var length_prefix = radix_encode(escaped.length, 5);
+  return '$' + length_prefix + escaped;
+};
+
+var string_decode = function (s, i) {
+  var length = radix_code(s.substr(i + 1, 5));
+  var string = escape_decode(s.substr(i + 6, length));
+  return [string, length + 6];
+};
 
 
 Regular expression encoding.
-This is just like string
+This is just like string encoding, but the prefix varies depending on the flags.
+There are also fewer digits used to encode the length, since regexps top out at
+30M characters or so (and that's on Chrome, which has the highest tolerance for
+this kind of thing). This means that we need only four digits.
+
+var regexp_encode = function (r) {
+  var multiples     = {g: 4, m: 2, i: 1};
+  var parsed        = /^\/(.*)\/([gim]*)$/.exec(r.toString());
+  var escaped       = escape_encode(parsed[1]);
+  var length_prefix = radix_encode(escaped.length, 4);
+
+  for (var flags = 0, flag_string = parsed[2],
+           i = 0, l = flag_string.length; i < l; ++i)
+    flags += multiples[flag_string.charAt(i)];
+
+  return String.fromCharCode(114 + flags) + length_prefix + escaped;
+};
+
+var regexp_decode = function (s, i) {
+  var flag_mask = s.charCodeAt(i) - 114;
+  var flags     = [flag_mask & 1 ? 'i' : '',
+                   flag_mask & 2 ? 'm' : '',
+                   flag_mask & 4 ? 'g' : ''].join('');
+  var length    = radix_code(s.substr(i + 1, 4));
+  var content   = escape_decode(s.substr(i + 5, length));
+
+  return [new RegExp(content, flags), length + 5];
+};
+
+
+Floating-point encoding.
+This is a fun one. It uses some ad-hoc floating-point manipulation code and a
+tuple entropy coder to pack lots of data into the first two bytes of the
+serialization.
+
+You can only encode valid floating-point numbers, which conspicuously don't
+include infinity, negative infinity, or NaN. It also doesn't handle 0, which has
+its own encoding.
+
+var float_encode = function (x) {
+  // First determine the mantissa sign and flip it if necessary.
+  var negative = x === (x = Math.abs(x));
+
+  // Next grab the floating-point exponent. To do this, we normalize the
+  // mantissa to represent a 52-bit integer.
+  var exponent = Math.floor(Math.log(x) / Math.log(2));
+  var mantissa = x / Math.exp(exponent - 52 * Math.log(2));
+
+  print(exponent);
+  print(mantissa);
+
+  // Now radix-code the mantissa, and always use 8 bytes to represent it.
+  var encoded_mantissa = radix_encode(Math.round(mantissa), 8);
+
+  // Radix-code the exponent, exponent sign, and mantissa sign.
+  var exponent_negative = exponent === (exponent = Math.abs(exponent));
+  var encoded_exponent  = radix_encode(+negative + +exponent_negative * 2 +
+                                       exponent * 4, 2);
+
+  return 'j' + encoded_exponent + encoded_mantissa;
+};
+
+var float_decode = function (s, i) {
+  var exponent_block = radix_code(s.substr(i + 1, 2));
+  var mantissa_block = radix_code(s.substr(i + 3, 8));
+
+  var exponent = (exponent_block >>> 4) * (exponent_block & 2 ? -1 : 1);
+
+  return [mantissa_block * Math.exp((exponent + 52) * Math.log(2)) *
+                           (exponent_block & 1 ? -1 : 1),
+          11];
+};
