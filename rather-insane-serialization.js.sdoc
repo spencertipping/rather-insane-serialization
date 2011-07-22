@@ -97,6 +97,12 @@ The two-byte escape prefixes are ! and ", and the three-byte escape prefixes are
 #, $, %, &, ', (, ), and *. This leaves a contiguous range of ASCII characters
 between 43 and 126 inclusive; these are all encoded verbatim.
 
+There are some special cases when encoding strings. Most strings that end up in
+the constant table are actually quite short, so there are a bunch of prefixes
+for strings that are small. They begin at the character K and continue until `,
+which directly precedes 'a'. K denotes a string of length 1; the zero-length
+string is implicitly present in the constant table.
+
 String encoding is also used for regular expressions. The only difference here
 is that there are several different regexp prefixes, one to encode each
 configuration of flags. The prefixes and flag combinations are:
@@ -285,18 +291,35 @@ var date_decode = function (s, i) {
 
 String encoding.
 This is just escape encoding, except that the length and a '$' string prefix are
-both prepended to the result.
+both prepended to the result. For short strings, the K to ` characters are used
+to imply the length.
+
+Note that this function shouldn't be used to encode the empty string (not that
+anything bad will happen). The empty string is implicitly present in the
+constant table, so it doesn't need to be added.
 
 var string_encode = function (s) {
-  var escaped       = escape_encode(s);
+  var escaped = escape_encode(s);
+
+  if (escaped.length < 22)
+    return String.fromCharCode(74 + escaped.length) + escaped;
+
   var length_prefix = radix_encode(escaped.length, 5);
   return '$' + length_prefix + escaped;
 };
 
 var string_decode = function (s, i) {
-  var length = radix_code(s.substr(i + 1, 5));
-  var string = escape_decode(s.substr(i + 6, length));
-  return [string, length + 6];
+  if (s.charAt(i) === '$') {
+    // Length-prefixed string (fully coded length in the first five bytes)
+    var length = radix_code(s.substr(i + 1, 5));
+    var string = escape_decode(s.substr(i + 6, length));
+    return [string, length + 6];
+  } else {
+    // Length is encoded in the prefix
+    var length = s.charCodeAt(i) - 74;
+    var string = escape_decode(s.substr(i + 1, length));
+    return [string, length + 1];
+  }
 };
 
 
@@ -437,5 +460,3 @@ var float_decode = function (s, i) {
                            (exponent_block & 1 ? -1 : 1),
           11];
 };
-
-
