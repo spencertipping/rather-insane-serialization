@@ -301,7 +301,7 @@ var date_decode = function (s, i) {
 var string_encode = function (s) {
   var escaped = escape_encode(s);
 
-  if (escaped.length < 22)
+  if (escaped.length <= 22)
     return String.fromCharCode(74 + escaped.length) + escaped;
 
   var length_prefix = radix_encode(escaped.length, 5);
