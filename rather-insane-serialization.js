@@ -329,21 +329,22 @@ var regexp_decode = function (s, i) {
 
 var float_encode = function (x) {
   // First determine the mantissa sign and flip it if necessary.
-  var negative = x === (x = Math.abs(x));
+  var negative = x !== (x = Math.abs(x));
 
   // Next grab the floating-point exponent. To do this, we normalize the
-  // mantissa to represent a 52-bit integer.
-  var exponent = Math.floor(Math.log(x) / Math.log(2));
-  var mantissa = x / Math.exp(exponent - 52 * Math.log(2));
+  // mantissa to represent a 53-bit integer whose highest bit is always set.
+  var log_2    = Math.log(2);
+  var exponent = Math.floor(Math.log(x) / log_2) - 53;
+  var mantissa = x / Math.exp(exponent * log_2) - Math.exp(53 * log_2);
 
-  print(exponent);
-  print(mantissa);
+  // We sometimes lose a few bits due to rounding error.
+  if (mantissa < 0) mantissa = 0;
 
   // Now radix-code the mantissa, and always use 8 bytes to represent it.
   var encoded_mantissa = radix_encode(Math.round(mantissa), 8);
 
   // Radix-code the exponent, exponent sign, and mantissa sign.
-  var exponent_negative = exponent === (exponent = Math.abs(exponent));
+  var exponent_negative = exponent !== (exponent = Math.abs(exponent));
   var encoded_exponent  = radix_encode(+negative + +exponent_negative * 2 +
                                        exponent * 4, 2);
 
@@ -351,12 +352,13 @@ var float_encode = function (x) {
 };
 
 var float_decode = function (s, i) {
+  var log_2          = Math.log(2);
   var exponent_block = radix_code(s.substr(i + 1, 2));
-  var mantissa_block = radix_code(s.substr(i + 3, 8));
+  var mantissa_block = radix_code(s.substr(i + 3, 8)) + Math.exp(53 * log_2);
 
   var exponent = (exponent_block >>> 4) * (exponent_block & 2 ? -1 : 1);
 
-  return [mantissa_block * Math.exp((exponent + 52) * Math.log(2)) *
+  return [mantissa_block * Math.exp(exponent * log_2) *
                            (exponent_block & 1 ? -1 : 1),
           11];
 };
