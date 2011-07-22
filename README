@@ -18,4 +18,6 @@ using the serialize/deserialize methods. For example:
   var serialized = rather_insane_serialization.encode(pathological);
   var deserialized = rather_insane_serialization.decode(pathological);
 
-At this point, 'deserialized' is a copy of 'pathological'.
+At this point, 'deserialized' is a copy of 'pathological'. 'serialized' is this:
+
+!!!*!!!*!b"b#"Pregexpr!!!$fooNloop_just_for_good_measure#!!!H!A!Ix!J!A{!+!A!A!A!Areturn!Ax!A+!A1;!+}!!!#*$)*+*,--$./0*12
