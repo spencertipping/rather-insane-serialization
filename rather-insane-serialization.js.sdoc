@@ -356,7 +356,7 @@ var float_decode = function (s, i) {
   var exponent_block = radix_code(s.substr(i + 1, 2));
   var mantissa_block = radix_code(s.substr(i + 3, 8)) + Math.exp(53 * log_2);
 
-  var exponent = (exponent_block >>> 4) * (exponent_block & 2 ? -1 : 1);
+  var exponent = (exponent_block >>> 2) * (exponent_block & 2 ? -1 : 1);
 
   return [mantissa_block * Math.exp(exponent * log_2) *
                            (exponent_block & 1 ? -1 : 1),
