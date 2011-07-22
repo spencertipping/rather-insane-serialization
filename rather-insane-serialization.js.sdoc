@@ -48,6 +48,11 @@ constructor is stable under serialization:
   sender.decode(sender.encode(new f())).constructor === fd      // -> true
   sender.decode(sender.encode(new fd())).constructor === fd     // -> true
 
+Note that a stateful serialization stream maintains a reference to every
+constructor (and by extension, every prototype) that it ever sees. You'll need
+to release references to the stream in order for the constructors to be
+garbage-collected.
+
 
 Serialization bytecode.
 The first incarnation of this system used Javascript code as the serialization
