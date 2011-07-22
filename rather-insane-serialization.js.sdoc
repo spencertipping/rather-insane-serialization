@@ -548,6 +548,30 @@ These functions mark objects using a 'secret key' -- that is, a constant string
 that is astronomically unlikely to exist in an object already. (The odds are
 equivalent to guessing a 128-bit encryption key.)
 
+Working with instances is surprisingly subtle. Most of it has to do with the way
+prototypes work; the problem arises when prototype inheritance is used:
+
+| var f = function () {...};
+  var g = function () {...};
+  g.prototype = new f();        // Set up superclass relationship
+  g.prototype.constructor = g;  // Set up constructor (this is the problem)
+
+Once the child class's constructor is reset, we have no way of accessing the
+parent class.
+
+The only workaround that I've come up with is to use 'instanceof' and topsort
+the parents. So if functions F, G, and H are related with prototype inheritance
+such that F is the superclass of G, which is the superclass of H, then
+'instanceof' fully orders them by subclassing; that is:
+
+| f.prototype instanceof Object         // probably true
+  g.prototype instanceof f              // definitely true
+  h.prototype instanceof g              // definitely true
+
+Then we can identify a prototype by finding the most specific class that it's an
+instance of; we can then encode the prototype as an instance of this class and
+encode its .constructor property as just another attribute.
+
 var encode = function (x) {
   // Generate a secret key that is used to identify boxed objects. Each
   // character is base-94, so it provides 6.5 bits of entropy. This means that
@@ -637,7 +661,7 @@ var encode = function (x) {
     else if (o.constructor === RegExp)   use(regexp_encode);
     else if (o.constructor === Function) use(function_encode);
 
-    else if (o !== (o.constructor && o.constructor.prototype)) {
+    else {
       // We have a custom object type, so we need to encode its constructor.
       // Whether or not a given function is a constructor is determined by its
       // invocation, so here we just visit the regular function and then change
