@@ -16,7 +16,7 @@ Rather Insane Serialization can handle this case and reconstruct 'pathological'
 using the serialize/deserialize methods. For example:
 
   var serialized = rather_insane_serialization.encode(pathological);
-  var deserialized = rather_insane_serialization.decode(pathological);
+  var deserialized = rather_insane_serialization.decode(serialized);
 
 At this point, 'deserialized' is a copy of 'pathological'. 'serialized' is this:
 
