@@ -526,11 +526,18 @@ var encode = function (x) {
   };
 
   // Visit each of the fields in an object-like thing. This is used for anything
-  // that is likely to have a box.
+  // that is likely to have a box. The fields are sorted to guarantee stability;
+  // the same object should always be serialized the same way.
   var visit_fields = function (o) {
+    var sorted_fields = [];
     for (var k in o)
       if (Object.hasOwnProperty.call(o, k) && k !== key)
-        link(o, k, o[k]);
+        sorted_fields.push(k);
+
+    sorted_fields.sort();
+    for (var i = 0, l = sorted_fields.length, k; i < l; ++i)
+      link(o, k = sorted_fields[i], o[k]);
+
     return o;
   };
 
