@@ -515,7 +515,9 @@ var encode = function (x) {
   var graph  = {};
   var marked = [];
 
-  // Create a graph link. This uses indirect identifiers.
+  // Create a graph link. For things of the form object.prop = value, 'prop'
+  // is linked to a string in the constant table rather than being encoded
+  // directly. This mitigates the impact of large property names.
   var link = function (object, property, value) {
     var converted_property = /^\d+$/.test(property) ? +property : property;
 
@@ -541,10 +543,10 @@ var encode = function (x) {
     return o;
   };
 
-  // Recursively explore objects, identifying each one. The visit() function
-  // returns the constant table ID of a value; for objects and arrays, it
-  // prefixes the code with 'o' or 'a', respectively, to indicate that the ID
-  // will change.
+  // Takes an object, identifies it, and returns that identification. For
+  // objects, arrays, and functions, the property table is scanned and each
+  // property is visited by the mark() function below. This is done in such a
+  // way that circular references are recorded but don't cause infinite loops.
   var visit = function (o) {
     if (o === null)   return 2;
     if (o === void 0) return 3;
@@ -645,12 +647,6 @@ var encode = function (x) {
 };
 
 var decode = function (s) {
-  // Create a new secret key for secure instantiation. See constructor_decode()
-  // for more information.
-  for (var key = '',
-           i = 0; i < 20; ++i)
-    key += String.fromCharCode((Math.random() * 95 >>> 0) + 33);
-
   // Decodes something based on the prefix and returns it, along with the number
   // of characters that should be skipped.
   var decode_one = function (s, i) {
